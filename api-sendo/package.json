@@ -1,0 +1,29 @@
+{
+  "name": "api-sendo",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node index.js",
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "generate-wallet": "node scripts/generateHotWallet.js",
+    "verify-wallet": "node scripts/verifyHotWallet.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@near-js/signers": "^2.3.4",
+    "bitcoinjs-lib": "^7.0.0",
+    "bs58": "^6.0.0",
+    "dotenv": "^17.2.3",
+    "ethers": "^6.15.0",
+    "express": "^5.1.0",
+    "mongoose": "^8.19.1",
+    "near-api-js": "^6.3.1",
+    "near-ca": "^0.12.0",
+    "tiny-secp256k1": "^2.2.4"
+  }
+}
