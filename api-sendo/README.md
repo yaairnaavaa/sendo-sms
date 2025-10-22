@@ -670,24 +670,413 @@ curl http://localhost:3000/api/monitor/status
 curl -X POST http://localhost:3000/api/monitor/stop
 ```
 
+## 🧹 SWEEP SERVICE - Consolidación de Fondos
+
+### ⭐ NUEVA FUNCIONALIDAD IMPLEMENTADA
+
+El sistema ahora cuenta con un **Sweep Service completamente funcional** que consolida fondos de direcciones de depósito de usuarios hacia la cuenta treasury usando:
+
+- ✅ **NEAR MPC** para firmar transacciones desde wallets derivadas
+- ✅ **Gas Sponsor Wallet** para pagar gas fees
+- ✅ **Smart Sweep** basado en liquidez de treasury
+- ✅ **Threshold Sweep** basado en balances de usuarios
+- ✅ **Automatic & Manual** modes
+
+### Arquitectura de Tres Niveles
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                   WALLET ARCHITECTURE                        │
+├─────────────────────────────────────────────────────────────┤
+│                                                              │
+│  1. USER DEPOSIT ADDRESSES (MPC-Derived)                    │
+│     - Generadas con NEAR MPC                                │
+│     - Reciben depósitos de usuarios                         │
+│     - NO almacenan ETH (gas lo provee Gas Sponsor)          │
+│                    ↓                                         │
+│  2. GAS SPONSOR WALLET (Hot, ETH only)                      │
+│     - Envía ETH a deposit addresses para gas                │
+│     - Solo mantiene ETH (~1-2 ETH)                          │
+│     - Paga gas fees de todas las operaciones sweep          │
+│                    ↓                                         │
+│  3. TREASURY WALLET (Cold Storage)                          │
+│     - Recibe todos los tokens consolidados                  │
+│     - Cold wallet / Multi-sig recomendado                   │
+│     - Almacena la mayoría de los fondos                     │
+│                    ↓                                         │
+│  4. HOT WALLET (For Withdrawals)                            │
+│     - Procesa retiros de usuarios                           │
+│     - Limitada liquidez para operaciones diarias            │
+│     - Se fondea desde Treasury cuando es necesario          │
+│                                                              │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Flujo de Sweep
+
+```
+1. Usuario deposita → Deposit Address (user1.arbitrumAddress)
+2. Monitor detecta depósito → Actualiza DB
+3. Sweep Service verifica si es necesario barrer:
+   ┌─────────────────────────────────────────────────┐
+   │ SMART MODE (Recomendado):                       │
+   │ - Verifica liquidez en Treasury                 │
+   │ - Solo barre si Treasury < MIN_RESERVE          │
+   │ - Threshold dinámico (más agresivo si urgente)  │
+   └─────────────────────────────────────────────────┘
+   ┌─────────────────────────────────────────────────┐
+   │ THRESHOLD MODE:                                 │
+   │ - Barre si balance usuario > THRESHOLD          │
+   │ - Ejecuta en intervalos regulares               │
+   └─────────────────────────────────────────────────┘
+4. Gas Sponsor envía ETH a Deposit Address para gas
+5. MPC firma transacción desde Deposit Address
+6. Tokens se transfieren a Treasury
+7. DB se actualiza (balance usuario = 0)
+```
+
+### Modos de Sweep
+
+#### 1. **Smart Sweep** (⭐ RECOMENDADO)
+```bash
+# Barre solo cuando Treasury necesita liquidez
+curl -X POST http://localhost:3000/api/monitor/sweep/smart
+```
+
+**Características:**
+- Verifica balance de Treasury
+- Solo barre si Treasury < `MIN_TREASURY_RESERVE`
+- Threshold dinámico (50% del normal si es urgente)
+- Minimiza gas fees al barrer solo cuando es necesario
+- Ideal para producción
+
+**Configuración:**
+```env
+SWEEP_MODE=smart
+MIN_TREASURY_RESERVE_PYUSD=10000
+MIN_TREASURY_RESERVE_USDT=10000
+```
+
+#### 2. **Threshold Sweep**
+```bash
+# Barre todos los usuarios con balance > THRESHOLD
+curl -X POST http://localhost:3000/api/monitor/sweep
+```
+
+**Características:**
+- Barre cuando balance usuario > threshold configurado
+- Ejecución regular en intervalos
+- Más predecible pero puede incurrir más gas fees
+
+**Configuración:**
+```env
+SWEEP_MODE=threshold
+SWEEP_THRESHOLD_PYUSD=100
+SWEEP_THRESHOLD_USDT=100
+```
+
+#### 3. **Manual Mode**
+```bash
+# Deshabilita sweep automático
+SWEEP_MODE=disabled
+```
+
+### Endpoints de Sweep
+
+#### Ver estadísticas de sweep
+```http
+GET /api/monitor/sweep/stats
+```
+
+**Respuesta:**
+```json
+{
+  "success": true,
+  "data": {
+    "totalUsers": 25,
+    "sweepableBalances": {
+      "PYUSD-ARB": { "count": 5, "totalAmount": 1250.5 },
+      "USDT-ARB": { "count": 3, "totalAmount": 890.25 }
+    },
+    "gasSponsorBalance": {
+      "address": "0x123...",
+      "eth": 1.5
+    },
+    "treasuryBalances": {
+      "address": "0x456...",
+      "PYUSD": 15000,
+      "USDT": 12000
+    }
+  }
+}
+```
+
+#### Verificar si Treasury necesita liquidez
+```http
+GET /api/monitor/sweep/liquidity-check
+```
+
+**Respuesta:**
+```json
+{
+  "success": true,
+  "data": {
+    "shouldSweep": true,
+    "currencies": ["PYUSD-ARB"],
+    "details": [
+      {
+        "currency": "PYUSD-ARB",
+        "currentBalance": 8000,
+        "targetBalance": 10000,
+        "deficit": 2000
+      }
+    ]
+  }
+}
+```
+
+#### Ejecutar sweep inteligente
+```http
+POST /api/monitor/sweep/smart
+```
+
+#### Ejecutar sweep por threshold
+```http
+POST /api/monitor/sweep
+```
+
+### Configuración de Variables de Entorno
+
+Ver el archivo `ENV_CONFIGURATION.md` para documentación completa.
+
+**Variables Críticas:**
+```env
+# Gas Sponsor (REQUERIDO para sweep)
+GAS_SPONSOR_PRIVATE_KEY=your_private_key_here
+
+# Treasury (REQUERIDO para sweep)
+TREASURY_WALLET_ADDRESS=0xYourTreasuryAddress
+
+# Sweep Configuration
+SWEEP_MODE=smart
+SWEEP_INTERVAL_HOURS=6
+SWEEP_THRESHOLD_PYUSD=100
+SWEEP_THRESHOLD_USDT=100
+MIN_TREASURY_RESERVE_PYUSD=10000
+MIN_TREASURY_RESERVE_USDT=10000
+```
+
+### Costos de Gas
+
+En Arbitrum One:
+- **Gas por sweep**: ~65,000 gas
+- **Costo aproximado**: $0.01 - $0.05 USD
+- **Con threshold de $100**: Fee ratio ~0.01-0.05%
+
+**Ejemplo con 100 usuarios depositando $50 cada uno:**
+- Total depositado: $5,000
+- Sweeps necesarios: ~50 (con threshold $100)
+- Costo total gas: ~$0.50 - $2.50
+- **Fee ratio: 0.01-0.05%** ✅
+
+### Seguridad y Best Practices
+
+1. **✅ Separación de Wallets**
+   - Gas Sponsor: Solo ETH
+   - Deposit Addresses: Tokens recibidos
+   - Treasury: Cold storage
+   - Hot Wallet: Retiros
+
+2. **✅ Monitoreo de Balances**
+   ```bash
+   # Verificar estado regularmente
+   curl http://localhost:3000/api/monitor/sweep/stats
+   ```
+
+3. **✅ Fondeo de Gas Sponsor**
+   - Mantener 1-2 ETH en Arbitrum
+   - Monitorear y recargar cuando < 0.5 ETH
+
+4. **✅ Configuración de Treasury**
+   - Usar hardware wallet o multi-sig
+   - Nunca usar la misma wallet para withdrawals
+
+5. **✅ Thresholds Apropiados**
+   - Ajustar según volumen de transacciones
+   - Balance entre seguridad y eficiencia
+
 ### Esquemas Recomendados
+
+#### Opción 1: Smart Sweep (⭐ RECOMENDADO para Producción)
+- **Modo**: `SWEEP_MODE=smart`
+- **Frecuencia**: Cada 6 horas
+- **Lógica**: Solo barre cuando Treasury necesita fondos
+
+**Pros:**
+- ✅ Minimiza costos de gas
+- ✅ Mantiene liquidez óptima en Treasury
+- ✅ Se adapta automáticamente a demanda
+- ✅ Menos transacciones on-chain
+
+**Contras:**
+- ⚠️ Fondos permanecen más tiempo en deposit addresses
+- ⚠️ Requiere configuración de reserves apropiada
+
+**Ideal para:**
+- Producción con volumen alto-medio
+- Cuando optimización de gas es prioridad
+- Operaciones con liquidez predecible
+
+#### Opción 2: Threshold Sweep (Bueno para MVP)
+- **Modo**: `SWEEP_MODE=threshold`
+- **Frecuencia**: Cada 1-3 horas
+- **Lógica**: Barre todos los usuarios con balance > threshold
+
+**Pros:**
+- ✅ Simple y predecible
+- ✅ Fondos se consolidan regularmente
+- ✅ Fácil de entender y monitorear
+
+**Contras:**
+- ⚠️ Más transacciones de gas
+- ⚠️ Puede barrer innecesariamente
+
+**Ideal para:**
+- MVP y testing
+- Volúmenes bajos
+- Cuando seguridad > eficiencia
+
+#### Opción 3: Manual Sweep (Para Desarrollo)
+- **Modo**: `SWEEP_MODE=disabled`
+- **Ejecución**: Manual via API
+
+**Pros:**
+- ✅ Control total
+- ✅ Sin sorpresas
+- ✅ Ideal para testing
+
+**Contras:**
+- ⚠️ Requiere intervención manual
+- ⚠️ No escalable
+
+**Ideal para:**
+- Desarrollo y staging
+- Testing de integración
+- Debugging
+
+### Ejemplo de Flujo Completo
+
+```bash
+# 1. Configurar variables de entorno
+cat > .env << EOF
+GAS_SPONSOR_PRIVATE_KEY=0x...
+TREASURY_WALLET_ADDRESS=0x...
+SWEEP_MODE=smart
+SWEEP_INTERVAL_HOURS=6
+MIN_TREASURY_RESERVE_PYUSD=10000
+EOF
+
+# 2. Iniciar servidor
+npm start
+
+# 3. Iniciar monitoreo (incluye sweep automático)
+curl -X POST http://localhost:3000/api/monitor/start
+
+# 4. Verificar configuración
+curl http://localhost:3000/api/monitor/sweep/stats | jq
+
+# 5. Usuario deposita fondos
+# ... (el monitor detecta automáticamente)
+
+# 6. Verificar si necesita sweep
+curl http://localhost:3000/api/monitor/sweep/liquidity-check | jq
+
+# 7. (Opcional) Ejecutar sweep manual si es necesario
+curl -X POST http://localhost:3000/api/monitor/sweep/smart | jq
+
+# 8. Verificar resultado
+curl http://localhost:3000/api/monitor/sweep/stats | jq
+```
+
+### Monitoreo y Alertas
+
+**Métricas clave a monitorear:**
+
+1. **Gas Sponsor Balance**
+   ```bash
+   # Alerta si < 0.5 ETH
+   curl http://localhost:3000/api/monitor/sweep/stats | jq '.data.gasSponsorBalance.eth'
+   ```
+
+2. **Treasury Balances**
+   ```bash
+   # Verificar niveles de liquidez
+   curl http://localhost:3000/api/monitor/sweep/stats | jq '.data.treasuryBalances'
+   ```
+
+3. **Sweepable Balances**
+   ```bash
+   # Ver cuántos fondos están pendientes de barrer
+   curl http://localhost:3000/api/monitor/sweep/stats | jq '.data.sweepableBalances'
+   ```
+
+4. **Sweep Success Rate**
+   ```bash
+   # Monitorear transacciones de sweep en DB
+   # Buscar status: 'failed' en metadata.sweepToTreasury: true
+   ```
+
+### Troubleshooting
+
+#### Error: "Gas sponsor wallet not configured"
+```bash
+# Solución: Agregar clave privada al .env
+echo "GAS_SPONSOR_PRIVATE_KEY=0xYourPrivateKey" >> .env
+```
+
+#### Error: "Insufficient balance in hot wallet"
+```bash
+# El Gas Sponsor necesita más ETH
+# Enviar 1-2 ETH a la dirección del Gas Sponsor en Arbitrum
+```
+
+#### Sweep no se ejecuta automáticamente
+```bash
+# Verificar configuración
+curl http://localhost:3000/api/monitor/status
+
+# Verificar logs del servidor para mensajes de sweep
+# Asegurarse que SWEEP_MODE != 'disabled'
+```
+
+#### Transaction failed on-chain
+```bash
+# Verificar:
+# 1. Gas Sponsor tiene suficiente ETH
+# 2. User deposit address tiene tokens
+# 3. RPC endpoint está funcionando
+# 4. Nonce no está duplicado
+```
+
+### Esquemas Recomendados (Resumen Anterior)
 
 #### Opción 1: Monitoreo Activo (Producción)
 ✅ **Recomendado para producción**
 - Monitoreo en tiempo real
 - Detección automática de depósitos
 - No requiere intervención manual
-- Sweep automático a cuenta maestra
+- ⭐ **Sweep automático funcional con MPC**
 
 **Pros:**
 - Totalmente automatizado
 - Experiencia de usuario fluida
-- Seguro (fondos se mueven a cuenta maestra)
+- Seguro (fondos se mueven a treasury via MPC)
+- Smart sweep optimiza costos de gas
 
 **Contras:**
 - Requiere infraestructura 24/7
-- Costos de RPC/API
-- Complejidad de mantenimiento
+- Costos de RPC/API (mínimos en Arbitrum)
+- Complejidad de mantenimiento (ahora simplificado con sweep automático)
 
 #### Opción 2: Webhook/Notificación (Desarrollo)
 ⚡ **Recomendado para desarrollo/MVP**

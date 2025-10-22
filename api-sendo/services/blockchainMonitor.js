@@ -355,77 +355,454 @@ class BitcoinMonitor {
 /**
  * Servicio de Sweep - Concentra fondos en cuentas maestras
  * Este servicio mueve los fondos de las cuentas de usuarios a cuentas de holding
+ * usando NEAR MPC para firmar y un Gas Sponsor Wallet para pagar gas fees
  */
 class SweepService {
   constructor() {
     this.provider = new ethers.JsonRpcProvider(RPC_ENDPOINTS.arbitrum);
-    this.masterWalletAddress = process.env.MASTER_WALLET_ADDRESS;
+    this.treasuryAddress = process.env.TREASURY_WALLET_ADDRESS;
+    
+    // Gas Sponsor Wallet - solo para pagar gas fees
+    const gasSponsorKey = process.env.GAS_SPONSOR_PRIVATE_KEY;
+    if (gasSponsorKey) {
+      this.gasSponsorWallet = new ethers.Wallet(gasSponsorKey, this.provider);
+      console.log(`⛽ Gas Sponsor Wallet initialized: ${this.gasSponsorWallet.address}`);
+    } else {
+      console.warn('⚠️ GAS_SPONSOR_PRIVATE_KEY not configured - sweep will not work');
+      this.gasSponsorWallet = null;
+    }
+
+    // Contratos ERC20
+    this.contracts = {
+      'PYUSD-ARB': new ethers.Contract(ARBITRUM_CONTRACTS.PYUSD, [
+        'function transfer(address to, uint256 amount) returns (bool)',
+        'function balanceOf(address account) view returns (uint256)'
+      ], this.provider),
+      'USDT-ARB': new ethers.Contract(ARBITRUM_CONTRACTS.USDT, [
+        'function transfer(address to, uint256 amount) returns (bool)',
+        'function balanceOf(address account) view returns (uint256)'
+      ], this.provider)
+    };
+
+    // Umbrales de sweep (cuando acumular sweep)
     this.sweepThreshold = {
-      'PYUSD-ARB': 10, // Sweep cuando hay más de 10 PYUSD
-      'USDT-ARB': 10,  // Sweep cuando hay más de 10 USDT
-      'SAT-BTC': 100000 // Sweep cuando hay más de 100k satoshis (0.001 BTC)
+      'PYUSD-ARB': parseFloat(process.env.SWEEP_THRESHOLD_PYUSD || '100'),
+      'USDT-ARB': parseFloat(process.env.SWEEP_THRESHOLD_USDT || '100'),
+      'SAT-BTC': parseInt(process.env.SWEEP_THRESHOLD_BTC || '1000000') // 0.01 BTC
+    };
+
+    // Configuración de liquidez para sweep inteligente
+    this.minTreasuryReserve = {
+      'PYUSD-ARB': parseFloat(process.env.MIN_TREASURY_RESERVE_PYUSD || '10000'),
+      'USDT-ARB': parseFloat(process.env.MIN_TREASURY_RESERVE_USDT || '10000')
     };
   }
 
   /**
-   * Verifica y ejecuta sweeps necesarios
+   * Verifica si es necesario hacer sweep basado en liquidez de treasury
+   */
+  async shouldSweepForLiquidity() {
+    if (!this.treasuryAddress) {
+      console.log('⚠️ Treasury address not configured, skipping liquidity check');
+      return { shouldSweep: false, currencies: [] };
+    }
+
+    const needsSweep = [];
+
+    try {
+      // Verificar balance de PYUSD en treasury
+      const pyusdBalance = await this.contracts['PYUSD-ARB'].balanceOf(this.treasuryAddress);
+      const pyusdAmount = parseFloat(ethers.formatUnits(pyusdBalance, 6));
+      
+      if (pyusdAmount < this.minTreasuryReserve['PYUSD-ARB']) {
+        needsSweep.push({
+          currency: 'PYUSD-ARB',
+          currentBalance: pyusdAmount,
+          targetBalance: this.minTreasuryReserve['PYUSD-ARB'],
+          deficit: this.minTreasuryReserve['PYUSD-ARB'] - pyusdAmount
+        });
+      }
+
+      // Verificar balance de USDT en treasury
+      const usdtBalance = await this.contracts['USDT-ARB'].balanceOf(this.treasuryAddress);
+      const usdtAmount = parseFloat(ethers.formatUnits(usdtBalance, 6));
+      
+      if (usdtAmount < this.minTreasuryReserve['USDT-ARB']) {
+        needsSweep.push({
+          currency: 'USDT-ARB',
+          currentBalance: usdtAmount,
+          targetBalance: this.minTreasuryReserve['USDT-ARB'],
+          deficit: this.minTreasuryReserve['USDT-ARB'] - usdtAmount
+        });
+      }
+
+      if (needsSweep.length > 0) {
+        console.log('💰 Treasury needs liquidity:');
+        needsSweep.forEach(item => {
+          console.log(`   ${item.currency}: ${item.currentBalance} (need ${item.targetBalance}, deficit: ${item.deficit})`);
+        });
+      }
+
+      return {
+        shouldSweep: needsSweep.length > 0,
+        currencies: needsSweep.map(item => item.currency)
+      };
+
+    } catch (error) {
+      console.error('Error checking treasury liquidity:', error);
+      return { shouldSweep: false, currencies: [] };
+    }
+  }
+
+  /**
+   * Verifica y ejecuta sweeps necesarios (threshold-based)
    */
   async checkAndSweep() {
     console.log('🧹 Checking for sweep opportunities...');
 
+    if (!this.gasSponsorWallet) {
+      console.log('⚠️ Gas sponsor wallet not configured. Cannot perform sweep.');
+      return { success: false, message: 'Gas sponsor wallet not configured' };
+    }
+
+    if (!this.treasuryAddress) {
+      console.log('⚠️ Treasury address not configured. Cannot perform sweep.');
+      return { success: false, message: 'Treasury address not configured' };
+    }
+
     const users = await User.find({
-      $or: [
-        { arbitrumAddress: { $exists: true, $ne: null } },
-        { bitcoinAddress: { $exists: true, $ne: null } }
-      ]
+      arbitrumAddress: { $exists: true, $ne: null }
     });
+
+    let sweepCount = 0;
+    const results = [];
 
     for (const user of users) {
       for (const balance of user.balances) {
+        // Solo sweep de tokens ERC20 por ahora (no Bitcoin)
+        if (!['PYUSD-ARB', 'USDT-ARB'].includes(balance.currency)) {
+          continue;
+        }
+
         if (balance.amount >= this.sweepThreshold[balance.currency]) {
-          await this.sweepUserFunds(user, balance.currency, balance.amount);
+          try {
+            const result = await this.sweepUserFunds(user, balance.currency, balance.amount);
+            sweepCount++;
+            results.push(result);
+          } catch (error) {
+            console.error(`Failed to sweep ${balance.currency} from ${user.name}:`, error.message);
+            results.push({
+              success: false,
+              user: user.name,
+              currency: balance.currency,
+              error: error.message
+            });
+          }
         }
       }
     }
 
-    console.log('✅ Sweep check completed');
+    console.log(`✅ Sweep check completed. Swept ${sweepCount} addresses.`);
+    return { success: true, sweepCount, results };
   }
 
   /**
-   * Ejecuta un sweep de fondos de usuario a cuenta maestra
+   * Sweep inteligente basado en liquidez
+   */
+  async smartSweep() {
+    console.log('🧠 Running smart liquidity-driven sweep...');
+
+    const liquidityCheck = await this.shouldSweepForLiquidity();
+    
+    if (!liquidityCheck.shouldSweep) {
+      console.log('✅ Treasury has sufficient liquidity. No sweep needed.');
+      return { success: true, message: 'No sweep needed', sweepCount: 0 };
+    }
+
+    console.log(`🎯 Treasury needs liquidity for: ${liquidityCheck.currencies.join(', ')}`);
+
+    // Sweep específicamente las monedas que necesitan liquidez
+    const users = await User.find({
+      arbitrumAddress: { $exists: true, $ne: null }
+    });
+
+    let sweepCount = 0;
+    const results = [];
+
+    for (const user of users) {
+      for (const balance of user.balances) {
+        // Solo sweep las monedas que necesitan liquidez
+        if (!liquidityCheck.currencies.includes(balance.currency)) {
+          continue;
+        }
+
+        // Sweep si tiene algo significativo (threshold más bajo para liquidez urgente)
+        const urgentThreshold = this.sweepThreshold[balance.currency] * 0.5;
+        
+        if (balance.amount >= urgentThreshold) {
+          try {
+            const result = await this.sweepUserFunds(user, balance.currency, balance.amount);
+            sweepCount++;
+            results.push(result);
+          } catch (error) {
+            console.error(`Failed to sweep ${balance.currency} from ${user.name}:`, error.message);
+            results.push({
+              success: false,
+              user: user.name,
+              currency: balance.currency,
+              error: error.message
+            });
+          }
+        }
+      }
+    }
+
+    console.log(`✅ Smart sweep completed. Swept ${sweepCount} addresses.`);
+    return { success: true, sweepCount, results };
+  }
+
+  /**
+   * Ejecuta un sweep de fondos de usuario a treasury usando MPC + Gas Sponsor
    */
   async sweepUserFunds(user, currency, amount) {
     try {
-      console.log(`🧹 Sweeping ${amount} ${currency} from ${user.name} to master wallet`);
+      console.log(`🧹 Sweeping ${amount} ${currency} from ${user.name} (${user.arbitrumAddress}) to treasury`);
 
-      // Aquí implementarías la lógica real de transferencia usando NEAR MPC
-      // Por ahora, solo registramos la intención
+      // Verificar que tengamos todo lo necesario
+      if (!this.gasSponsorWallet) {
+        throw new Error('Gas sponsor wallet not configured');
+      }
 
-      // TODO: Implementar la firma y envío de transacción usando NEAR MPC
-      // 1. Construir la transacción
-      // 2. Obtener la firma del MPC
-      // 3. Enviar la transacción
-      // 4. Actualizar balances
+      if (!this.treasuryAddress) {
+        throw new Error('Treasury address not configured');
+      }
 
-      console.log(`⚠️ Sweep not implemented yet - would transfer ${amount} ${currency}`);
+      const contract = this.contracts[currency];
+      if (!contract) {
+        throw new Error(`Contract not found for currency: ${currency}`);
+      }
 
-      // Crear registro de transacción
+      // 1. Verificar balance on-chain del usuario
+      const onChainBalance = await contract.balanceOf(user.arbitrumAddress);
+      const onChainAmount = parseFloat(ethers.formatUnits(onChainBalance, 6));
+
+      console.log(`   On-chain balance: ${onChainAmount} ${currency}`);
+      console.log(`   DB balance: ${amount} ${currency}`);
+
+      if (onChainAmount < 1) {
+        console.log(`   ⚠️ Insufficient on-chain balance, skipping sweep`);
+        
+        // Update DB balance to match on-chain reality to prevent infinite retries
+        const balanceEntry = user.balances.find(b => b.currency === currency);
+        if (balanceEntry && balanceEntry.amount > 0) {
+          console.log(`   📝 Updating DB balance from ${balanceEntry.amount} to 0`);
+          balanceEntry.amount = 0;
+          await user.save();
+        }
+        
+        return { success: false, reason: 'Insufficient on-chain balance' };
+      }
+
+      // Usar el balance on-chain (más confiable)
+      const sweepAmount = onChainAmount;
+      const sweepAmountInUnits = ethers.parseUnits(sweepAmount.toString(), 6);
+
+      // 2. Estimar gas necesario
+      const gasEstimate = await contract.transfer.estimateGas(
+        this.treasuryAddress,
+        sweepAmountInUnits,
+        { from: user.arbitrumAddress }
+      );
+      
+      const feeData = await this.provider.getFeeData();
+      const gasNeeded = gasEstimate * BigInt(120) / BigInt(100); // 20% buffer
+      const ethNeeded = gasNeeded * feeData.gasPrice;
+
+      console.log(`   ⛽ Gas estimate: ${gasEstimate.toString()}`);
+      console.log(`   💰 ETH needed: ${ethers.formatEther(ethNeeded)} ETH`);
+
+      // 3. Verificar balance de ETH del usuario
+      const userEthBalance = await this.provider.getBalance(user.arbitrumAddress);
+      
+      if (userEthBalance < ethNeeded) {
+        console.log(`   📤 Sending ETH for gas from sponsor wallet...`);
+        
+        // Enviar ETH desde gas sponsor wallet
+        // Let ethers.js automatically determine the best gas settings
+        const gasTx = await this.gasSponsorWallet.sendTransaction({
+          to: user.arbitrumAddress,
+          value: ethNeeded
+          // Don't specify gasLimit or type - let ethers handle it
+        });
+
+        console.log(`   ⏳ Waiting for gas transfer: ${gasTx.hash}`);
+        await gasTx.wait();
+        console.log(`   ✅ Gas transferred successfully`);
+      } else {
+        console.log(`   ✅ User address already has sufficient ETH for gas`);
+      }
+
+      // 4. Preparar la transacción de transferencia de tokens
+      const { getAdapter } = require('./nearService');
+      const phoneNumberClean = user.phoneNumber.replace(/\D/g, '');
+      const derivationPath = `arb-${phoneNumberClean}`;
+
+      console.log(`   🔐 Getting MPC adapter for path: ${derivationPath}`);
+      const adapter = await getAdapter(derivationPath);
+
+      // 5. Construir y enviar la transacción con MPC
+      console.log(`   📝 Building transfer transaction...`);
+      
+      const tx = await contract.transfer.populateTransaction(
+        this.treasuryAddress,
+        sweepAmountInUnits
+      );
+
+      // Agregar datos de la transacción
+      tx.from = user.arbitrumAddress;
+      tx.chainId = 42161; // Arbitrum One
+      tx.gasLimit = gasNeeded;
+      tx.gasPrice = feeData.gasPrice;
+      tx.nonce = await this.provider.getTransactionCount(user.arbitrumAddress);
+
+      console.log(`   🔐 Signing and sending transaction with MPC...`);
+      const signedTx = await adapter.signAndSendTransaction(tx);
+
+      console.log(`   ⏳ Transaction sent: ${signedTx.hash}`);
+      console.log(`   ⏳ Waiting for confirmation...`);
+
+      const receipt = await signedTx.wait();
+
+      console.log(`   ✅ Transaction confirmed in block ${receipt.blockNumber}`);
+
+      // 6. Actualizar balance en DB (set to 0 ya que se barrió todo)
+      const balanceEntry = user.balances.find(b => b.currency === currency);
+      balanceEntry.amount = 0;
+      await user.save();
+
+      // 7. Crear registro de transacción
+      await Transaction.create({
+        user: user._id,
+        type: 'withdrawal',
+        currency: currency,
+        amount: sweepAmount,
+        status: 'completed',
+        metadata: {
+          sweepToTreasury: true,
+          treasuryAddress: this.treasuryAddress,
+          txHash: signedTx.hash,
+          blockNumber: receipt.blockNumber,
+          gasUsed: receipt.gasUsed.toString(),
+          gasPaid: ethers.formatEther(ethNeeded),
+          initiatedAt: new Date(),
+          completedAt: new Date()
+        }
+      });
+
+      console.log(`   ✅ Sweep completed for ${user.name}`);
+
+      return {
+        success: true,
+        user: user.name,
+        currency: currency,
+        amount: sweepAmount,
+        txHash: signedTx.hash,
+        blockNumber: receipt.blockNumber
+      };
+
+    } catch (error) {
+      console.error(`   ❌ Error sweeping funds for ${user.name}:`, error.message);
+      
+      // Check if it's an RPC rate limit error
+      const isRateLimitError = error.message.includes('429') || 
+                               error.message.includes('rate limit') || 
+                               error.message.includes('Too Many Requests') ||
+                               error.message.includes('exceeded maximum retry');
+      
+      if (isRateLimitError) {
+        console.log(`   ⚠️ RPC rate limit hit - will retry on next sweep cycle`);
+        // Don't create a failed transaction for rate limit errors
+        // Just return the error without throwing
+        return {
+          success: false,
+          user: user.name,
+          currency: currency,
+          error: 'RPC rate limit - will retry later'
+        };
+      }
+      
+      // For other errors, create a failed transaction record
       await Transaction.create({
         user: user._id,
         type: 'withdrawal',
         currency: currency,
         amount: amount,
-        status: 'pending',
+        status: 'failed',
         metadata: {
-          sweepToMaster: true,
-          masterWalletAddress: this.masterWalletAddress,
-          initiatedAt: new Date()
+          sweepToTreasury: true,
+          treasuryAddress: this.treasuryAddress,
+          error: error.message,
+          initiatedAt: new Date(),
+          failedAt: new Date()
         }
       });
 
-    } catch (error) {
-      console.error(`Error sweeping funds for ${user.name}:`, error);
+      throw error;
     }
+  }
+
+  /**
+   * Obtiene estadísticas de sweep
+   */
+  async getSweepStats() {
+    const users = await User.find({
+      arbitrumAddress: { $exists: true, $ne: null }
+    });
+
+    const stats = {
+      totalUsers: users.length,
+      sweepableBalances: {
+        'PYUSD-ARB': { count: 0, totalAmount: 0 },
+        'USDT-ARB': { count: 0, totalAmount: 0 }
+      },
+      gasSponsorBalance: null,
+      treasuryBalances: {}
+    };
+
+    // Contar balances que están sobre el threshold
+    for (const user of users) {
+      for (const balance of user.balances) {
+        if (['PYUSD-ARB', 'USDT-ARB'].includes(balance.currency)) {
+          if (balance.amount >= this.sweepThreshold[balance.currency]) {
+            stats.sweepableBalances[balance.currency].count++;
+            stats.sweepableBalances[balance.currency].totalAmount += balance.amount;
+          }
+        }
+      }
+    }
+
+    // Balance del gas sponsor
+    if (this.gasSponsorWallet) {
+      const gasSponsorEth = await this.provider.getBalance(this.gasSponsorWallet.address);
+      stats.gasSponsorBalance = {
+        address: this.gasSponsorWallet.address,
+        eth: parseFloat(ethers.formatEther(gasSponsorEth))
+      };
+    }
+
+    // Balances del treasury
+    if (this.treasuryAddress) {
+      const pyusdBalance = await this.contracts['PYUSD-ARB'].balanceOf(this.treasuryAddress);
+      const usdtBalance = await this.contracts['USDT-ARB'].balanceOf(this.treasuryAddress);
+      
+      stats.treasuryBalances = {
+        address: this.treasuryAddress,
+        PYUSD: parseFloat(ethers.formatUnits(pyusdBalance, 6)),
+        USDT: parseFloat(ethers.formatUnits(usdtBalance, 6))
+      };
+    }
+
+    return stats;
   }
 }
 
@@ -433,6 +810,7 @@ class SweepService {
 let arbitrumMonitor = null;
 let bitcoinMonitor = null;
 let sweepService = null;
+let sweepIntervalId = null;
 
 /**
  * Inicia todos los servicios de monitoreo
@@ -450,10 +828,32 @@ async function startMonitoring() {
 
   if (!sweepService) {
     sweepService = new SweepService();
-    // Ejecutar sweep cada hora
-    setInterval(() => {
-      sweepService.checkAndSweep();
-    }, 3600000); // 1 hora
+    
+    // Configurar sweep automático
+    const sweepMode = process.env.SWEEP_MODE || 'smart'; // 'smart', 'threshold', or 'disabled'
+    const sweepInterval = parseInt(process.env.SWEEP_INTERVAL_HOURS || '6') * 3600000; // Default: 6 horas
+    
+    if (sweepMode !== 'disabled') {
+      console.log(`🧹 Configuring automatic sweep (mode: ${sweepMode}, interval: ${sweepInterval / 3600000} hours)`);
+      
+      sweepIntervalId = setInterval(async () => {
+        try {
+          if (sweepMode === 'smart') {
+            console.log('🧠 Running scheduled smart sweep...');
+            await sweepService.smartSweep();
+          } else if (sweepMode === 'threshold') {
+            console.log('🧹 Running scheduled threshold-based sweep...');
+            await sweepService.checkAndSweep();
+          }
+        } catch (error) {
+          console.error('Error in scheduled sweep:', error);
+        }
+      }, sweepInterval);
+      
+      console.log(`✅ Automatic sweep configured (${sweepMode} mode)`);
+    } else {
+      console.log('⚠️ Automatic sweep disabled. Use manual endpoints to trigger sweeps.');
+    }
   }
 
   console.log('✅ All monitoring services started');
@@ -469,6 +869,12 @@ function stopMonitoring() {
 
   if (bitcoinMonitor) {
     bitcoinMonitor.stopMonitoring();
+  }
+
+  if (sweepIntervalId) {
+    clearInterval(sweepIntervalId);
+    sweepIntervalId = null;
+    console.log('🛑 Automatic sweep stopped');
   }
 
   console.log('✅ All monitoring services stopped');
