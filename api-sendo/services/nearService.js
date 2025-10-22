@@ -162,7 +162,71 @@ const deriveBitcoinAddress = async (derivationPath) => {
   }
 };
 
+/**
+ * Signs an EVM transaction using NEAR MPC
+ * @param {string} derivationPath - The derivation path for the user's wallet
+ * @param {Object} transaction - The transaction object to sign
+ * @returns {Promise<string>} The signed transaction hex string
+ */
+const signEvmTransactionWithMPC = async (derivationPath, transaction) => {
+  try {
+    const accountId = process.env.NEAR_ACCOUNT_ID;
+    const privateKey = process.env.NEAR_PRIVATE_KEY;
+    const mpcContractId = process.env.NEAR_MPC_CONTRACT_ID || 'v1.signer-prod.testnet';
+
+    if (!accountId) {
+      throw new Error('NEAR_ACCOUNT_ID is required in .env file');
+    }
+
+    console.log(`🔐 Signing transaction with MPC for path: ${derivationPath}`);
+
+    // Setup the EVM adapter using near-ca
+    const adapter = await setupAdapter({
+      accountId,
+      mpcContractId,
+      derivationPath,
+      privateKey,
+    });
+
+    // Sign the transaction using the adapter
+    const signedTx = await adapter.signAndSendTransaction(transaction);
+
+    console.log(`✅ Transaction signed successfully: ${signedTx.hash}`);
+
+    return signedTx;
+
+  } catch (error) {
+    console.error('Error signing transaction with MPC:', error);
+    throw new Error(`Could not sign transaction via NEAR MPC. Original error: ${error.message}`);
+  }
+};
+
+/**
+ * Gets an adapter instance for a specific derivation path
+ * Useful for multiple operations on the same address
+ * @param {string} derivationPath - The derivation path
+ * @returns {Promise<Object>} The near-ca adapter instance
+ */
+const getAdapter = async (derivationPath) => {
+  const accountId = process.env.NEAR_ACCOUNT_ID;
+  const privateKey = process.env.NEAR_PRIVATE_KEY;
+  const mpcContractId = process.env.NEAR_MPC_CONTRACT_ID || 'v1.signer-prod.testnet';
+
+  if (!accountId) {
+    throw new Error('NEAR_ACCOUNT_ID is required in .env file');
+  }
+
+  return await setupAdapter({
+    accountId,
+    mpcContractId,
+    derivationPath,
+    privateKey,
+  });
+};
+
 module.exports = {
   deriveArbitrumAddress,
   deriveBitcoinAddress,
+  signEvmTransactionWithMPC,
+  getAdapter,
 };
