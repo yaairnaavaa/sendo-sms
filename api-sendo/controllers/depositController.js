@@ -6,7 +6,7 @@ const User = require('../models/userModel');
 const getDepositInfo = async (req, res) => {
   try {
     const userId = req.params.userId;
-    const user = await User.findById(userId);
+    const user = await User.findOne({phoneNumber:userId});
 
     if (!user) {
       return res.status(404).json({ success: false, message: 'User not found' });
@@ -39,7 +39,7 @@ const getDepositInfo = async (req, res) => {
         network: 'Bitcoin Mainnet',
         address: null,
         message: 'Bitcoin address not generated yet. Please create a Bitcoin account first.',
-        endpoint: `/api/users/${userId}/bitcoin-account`
+        endpoint: `/api/users/${user._id}/bitcoin-account`
       });
     }
 
@@ -62,7 +62,7 @@ const getDepositInfo = async (req, res) => {
         network: 'Arbitrum One',
         address: null,
         message: 'Arbitrum address not generated yet. Please create an Arbitrum account first.',
-        endpoint: `/api/users/${userId}/arbitrum-account`
+        endpoint: `/api/users/${user._id}/arbitrum-account`
       });
     }
 
@@ -85,7 +85,7 @@ const getDepositInfo = async (req, res) => {
         network: 'Arbitrum One',
         address: null,
         message: 'Arbitrum address not generated yet. Please create an Arbitrum account first.',
-        endpoint: `/api/users/${userId}/arbitrum-account`
+        endpoint: `/api/users/${user._id}/arbitrum-account`
       });
     }
 
