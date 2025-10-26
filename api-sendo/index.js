@@ -23,6 +23,10 @@ app.use('/api/users', userRoutes);
 app.use('/api/monitor', monitorRoutes);
 app.use('/api/withdrawals', withdrawalRoutes);
 
+app.get("/", (req,res) => {
+    res.send("Welcome to SENDO API");
+})
+
 const PORT = process.env.PORT || 3000;
 
 const server = app.listen(

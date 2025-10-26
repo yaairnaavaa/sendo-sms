@@ -38,7 +38,7 @@ app.post("/sms", async (req, res) => {
     twiml.message(
       "👋 Welcome to Sendo-SMS! Please choose an option:\n\n" +
       "1️⃣ Balance (To check balance, type: BALANCE)\n\n" +
-      "2️⃣ Deposit (Add funds: DEPOSIT CURRENCY AMOUNT, e.g., DEPOSIT USDT-ARB 50)\n\n" +
+      "2️⃣ Deposit (Add funds: DEPOSIT CURRENCY, e.g., DEPOSIT USDT-ARB)\n\n" +
       "3️⃣ Transfer (Send funds: TRANSFER TO_PHONE_NUMBER CURRENCY AMOUNT, e.g., TRANSFER +521234567890 USDT-ARB 50)\n\n" +
       "4️⃣ Withdraw (Withdraw funds: WITHDRAW CURRENCY AMOUNT, e.g., WITHDRAW USDT-ARB 10)\n\n" +
       "5️⃣ Convert crypto to another crypto (Supported: PYUSD, USD, BTC, ETH, MXN, e.g., CONVERT 5 BTC TO PYUSD)\n\n" +
@@ -131,40 +131,61 @@ app.post("/sms", async (req, res) => {
   // DEPOSIT
   else if (incomingMsgLower.startsWith("deposit")) {
     const parts = incomingMsgSMS.split(/\s+/);
-    if (parts.length !== 3) {
-      twiml.message("❌ Please send in format: DEPOSIT CURRENCY AMOUNT\nExample: DEPOSIT USDT-ARB 50");
+    if (parts.length !== 2) {
+      twiml.message("❌ Please send in format: DEPOSIT CURRENCY\nExample: DEPOSIT USDT-ARB");
     } else {
       const currency = parts[1].toUpperCase();
-      const amount = parseFloat(parts[2]);
 
-      if (!["PYUSD-ARB", "USDT-ARB", "SAT-BTC"].includes(currency) || isNaN(amount) || amount <= 0) {
-        twiml.message("❌ Invalid currency or amount. Valid currencies: PYUSD-ARB, USDT-ARB, SAT-BTC");
-      } else {
-        try {
-          const response = await fetch(`https://sendo-sms.vercel.app/api/users/${from}/transactions`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              type: "deposit",
-              currency,
-              amount
-            })
-          });
+      // Validamos moneda
+      if (!["PYUSD-ARB", "USDT-ARB", "SAT-BTC"].includes(currency)) {
+        twiml.message("❌ Invalid currency. Valid options: PYUSD-ARB, USDT-ARB, SAT-BTC");
+        return;
+      }
 
-          const data = await response.json();
+      try {
+        // Llamamos a la API para obtener direcciones de depósito
+        const response = await fetch(`https://sendo-sms.vercel.app/api/users/${from}/deposit`);
+        const data = await response.json();
 
-          if (data.success) {
-            twiml.message(`✅ Deposit successful!\nAmount: ${amount} ${currency}`);
-          } else {
-            twiml.message(`❌ Could not deposit: ${data.error || "Unknown error"}`);
-          }
-        } catch (error) {
-          console.error(error);
-          twiml.message("❌ Error processing deposit. Please try again later.");
+        console.log("data");
+        console.log(data);
+
+        if (!data.success || !data.data?.deposits) {
+          twiml.message("❌ Could not retrieve deposit info. Please try again later.");
+          return;
         }
+
+        // Mapeo entre la moneda del comando y el 'asset' del API
+        const assetMap = {
+          "PYUSD-ARB": "PYUSD",
+          "USDT-ARB": "USDT",
+          "SAT-BTC": "BTC"
+        };
+
+        const assetToFind = assetMap[currency];
+        const depositInfo = data.data.deposits.find(d => d.asset === assetToFind);
+
+        if (!depositInfo) {
+          twiml.message(`❌ Deposit information not found for ${currency}.`);
+          return;
+        }
+
+        // Construimos respuesta para el usuario
+        const msg = `💰 Deposit Information\n\n` +
+          `Currency: ${currency}\n\n` +
+          `Network: ${depositInfo.network}\n\n` +
+          `Address: ${depositInfo.address}\n\n` +
+          `Minimum Deposit: ${depositInfo.minimumDeposit}\n\n` +
+          `📋 ${depositInfo.instructions || ""}`;
+
+        twiml.message(msg.trim());
+      } catch (error) {
+        console.error(error);
+        twiml.message("❌ Error retrieving deposit address. Please try again later.");
       }
     }
   }
+
   // TRANSFER
   else if (incomingMsgLower.startsWith("transfer")) {
     const parts = incomingMsgSMS.split(/\s+/);
