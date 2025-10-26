@@ -40,7 +40,7 @@ app.post("/sms", async (req, res) => {
       "1️⃣ Balance (To check balance, type: BALANCE)\n\n" +
       "2️⃣ Deposit (Add funds: DEPOSIT CURRENCY, e.g., DEPOSIT USDT-ARB)\n\n" +
       "3️⃣ Transfer (Send funds: TRANSFER TO_PHONE_NUMBER CURRENCY AMOUNT, e.g., TRANSFER +521234567890 USDT-ARB 50)\n\n" +
-      "4️⃣ Withdraw (Withdraw funds: WITHDRAW CURRENCY AMOUNT, e.g., WITHDRAW USDT-ARB 10)\n\n" +
+      "4️⃣ Withdraw (Withdraw funds: WITHDRAW CURRENCY AMOUNT ADDRESS, e.g., WITHDRAW USDT-ARB 10 0xb37...2000)\n\n" +
       "5️⃣ Convert crypto to another crypto (Supported: PYUSD, USD, BTC, ETH, MXN, e.g., CONVERT 5 BTC TO PYUSD)\n\n" +
       "To register, type: REGISTER Name Email@example.com"
     );
@@ -228,40 +228,55 @@ app.post("/sms", async (req, res) => {
   // WITHDRAW
   else if (incomingMsgLower.startsWith("withdraw")) {
     const parts = incomingMsgSMS.split(/\s+/);
-    if (parts.length !== 3) {
-      twiml.message("❌ Please send in format: WITHDRAW CURRENCY AMOUNT\nExample: WITHDRAW USDT-ARB 50");
+
+    // Formato esperado: WITHDRAW CURRENCY AMOUNT ADDRESS
+    if (parts.length !== 4) {
+      twiml.message("❌ Please send in format:\nWITHDRAW CURRENCY AMOUNT ADDRESS\n\nExample:\nWITHDRAW USDT-ARB 50 0x742d35....0bEb");
     } else {
       const currency = parts[1].toUpperCase();
       const amount = parseFloat(parts[2]);
+      const destinationAddress = parts[3];
 
+      // Validar campos
       if (!["PYUSD-ARB", "USDT-ARB", "SAT-BTC"].includes(currency) || isNaN(amount) || amount <= 0) {
         twiml.message("❌ Invalid currency or amount. Valid currencies: PYUSD-ARB, USDT-ARB, SAT-BTC");
-      } else {
-        try {
-          const response = await fetch(`https://sendo-sms.vercel.app/api/users/${from}/transactions`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              type: "withdrawal",
-              currency,
-              amount
-            })
-          });
+        return;
+      }
 
-          const data = await response.json();
+      if (!destinationAddress || destinationAddress.length < 10) {
+        twiml.message("❌ Invalid destination address.");
+        return;
+      }
 
-          if (data.success) {
-            twiml.message(`✅ Withdraw successful!\nAmount: ${amount} ${currency}`);
-          } else {
-            twiml.message(`❌ Could not withdraw: ${data.error || "Unknown error"}`);
-          }
-        } catch (error) {
-          console.error(error);
-          twiml.message("❌ Error processing withdraw. Please try again later.");
+      try {
+        // POST al nuevo endpoint
+        const response = await fetch(`https://sendo-sms.vercel.app/api/withdrawals`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            userId: from, // Usamos el número del remitente como userId
+            currency,
+            amount,
+            destinationAddress
+          })
+        });
+
+        const data = await response.json();
+
+        if (data.success) {
+          twiml.message(
+            `✅ Withdrawal requested successfully!\n\nAmount: ${amount} ${currency}\nTo: ${destinationAddress}`
+          );
+        } else {
+          twiml.message(`❌ Withdrawal failed: ${data.error || "Unknown error"}`);
         }
+      } catch (error) {
+        console.error(error);
+        twiml.message("❌ Error processing withdrawal. Please try again later.");
       }
     }
   }
+
   // CONVERT
   else if (incomingMsgLower.startsWith("convert")) {
     const match = incomingMsgSMS.match(/convert\s+(\d+(\.\d+)?)\s+(\w+)\s+to\s+(\w+)/i);

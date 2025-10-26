@@ -27,6 +27,21 @@ const getUser = async (req, res) => {
   }
 };
 
+// @desc    Get single user
+// @route   GET /api/users/phone/:phone
+// @access  Public
+const getUserByPhone = async (req, res) => {
+  try {
+    const user = await User.findOne({phoneNumber:req.params.phone});
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
+    res.status(200).json({ success: true, data: user });
+  } catch (error) {
+    res.status(500).json({ success: false, message: 'Server Error' });
+  }
+};
+
 // @desc    Create new user
 // @route   POST /api/users
 // @access  Public
@@ -85,4 +100,5 @@ module.exports = {
   createUser,
   updateUser,
   deleteUser,
+  getUserByPhone
 };
