@@ -249,12 +249,22 @@ app.post("/sms", async (req, res) => {
       }
 
       try {
+        const userResponse = await fetch(`https://sendo-sms.vercel.app/api/users/phone/${from}`);
+        const userData = await userResponse.json();
+
+        if (!userData.success || !userData.data?._id) {
+          twiml.message("❌ Could not find user. Make sure your phone number is registered.");
+          return;
+        }
+
+        const userId = userData.data._id;
+
         // POST al nuevo endpoint
         const response = await fetch(`https://sendo-sms.vercel.app/api/withdrawals`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            userId: from, // Usamos el número del remitente como userId
+            userId: userId, // Usamos el número del remitente como userId
             currency,
             amount,
             destinationAddress
