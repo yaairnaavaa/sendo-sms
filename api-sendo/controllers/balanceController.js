@@ -5,7 +5,7 @@ const User = require('../models/userModel');
 // @access  Public
 const getBalances = async (req, res) => {
   try {
-    const user = await User.findById(req.params.userId);
+    const user = await User.findOne({phoneNumber:req.params.userId});
     if (!user) {
       return res.status(404).json({ success: false, message: 'User not found' });
     }
