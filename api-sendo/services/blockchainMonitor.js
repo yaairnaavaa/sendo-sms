@@ -44,22 +44,27 @@ class ArbitrumMonitor {
    */
   async startMonitoring() {
     console.log('🔍 Starting Arbitrum monitoring...');
+    console.log(`   PYUSD Contract: ${ARBITRUM_CONTRACTS.PYUSD}`);
+    console.log(`   USDT Contract: ${ARBITRUM_CONTRACTS.USDT}`);
+    console.log(`   RPC: ${RPC_ENDPOINTS.arbitrum}`);
 
     // Obtener el bloque actual
     this.lastCheckedBlock = await this.provider.getBlockNumber();
-    console.log(`Starting from block ${this.lastCheckedBlock}`);
+    console.log(`   Starting from block ${this.lastCheckedBlock}`);
 
     // Monitorear PYUSD
     this.pyusdContract.on('Transfer', async (from, to, value, event) => {
+      console.log(`📥 PYUSD Transfer detected: ${ethers.formatUnits(value, 6)} PYUSD to ${to}`);
       await this.handleTransfer('PYUSD-ARB', to, value, event);
     });
 
     // Monitorear USDT
     this.usdtContract.on('Transfer', async (from, to, value, event) => {
+      console.log(`📥 USDT Transfer detected: ${ethers.formatUnits(value, 6)} USDT to ${to}`);
       await this.handleTransfer('USDT-ARB', to, value, event);
     });
 
-    console.log('✅ Arbitrum monitoring active');
+    console.log('✅ Arbitrum monitoring active - listening for Transfer events');
   }
 
   /**
@@ -74,6 +79,7 @@ class ArbitrumMonitor {
 
       if (!user) {
         // No es una dirección de nuestro sistema
+        console.log(`   ⏭️  Not a user address (${to}) - skipping`);
         return;
       }
 
@@ -81,6 +87,7 @@ class ArbitrumMonitor {
       console.log(`   Currency: ${currency}`);
       console.log(`   Amount: ${ethers.formatUnits(value, currency === 'USDT-ARB' ? 6 : 6)}`);
       console.log(`   TX Hash: ${event.log.transactionHash}`);
+      console.log(`   Block: ${event.log.blockNumber}`);
 
       // Obtener decimales del token
       const decimals = currency === 'USDT-ARB' ? 6 : 6; // USDT y PYUSD usan 6 decimales
@@ -89,12 +96,14 @@ class ArbitrumMonitor {
       // Verificar confirmaciones
       const currentBlock = await this.provider.getBlockNumber();
       const confirmations = currentBlock - event.log.blockNumber;
+      console.log(`   Confirmations: ${confirmations}/12`);
 
       // Actualizar balance y crear transacción
       await this.processDeposit(user, currency, amount, event.log.transactionHash, confirmations);
 
     } catch (error) {
-      console.error('Error handling transfer:', error);
+      console.error('❌ Error handling transfer:', error.message);
+      console.error('   Stack:', error.stack);
     }
   }
 
