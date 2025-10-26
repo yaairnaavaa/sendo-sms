@@ -18,19 +18,19 @@ const getUserTransactions = async (req, res) => {
 // @route   POST /api/users/:userId/transactions
 // @access  Public
 const createTransaction = async (req, res) => {
-  const { type, currency, amount } = req.body;
+  const { type, currency, amount, toPhoneNumber } = req.body;
   const userId = req.params.userId;
 
   if (!type || !currency || !amount) {
     return res.status(400).json({ success: false, message: 'Please provide type, currency, and amount' });
   }
-  
+
   if (amount <= 0) {
     return res.status(400).json({ success: false, message: 'Amount must be positive' });
   }
 
   try {
-    const user = await User.findOne({phoneNumber:userId});
+    const user = await User.findOne({ phoneNumber: userId });
     if (!user) {
       return res.status(404).json({ success: false, message: 'User not found' });
     }
@@ -47,10 +47,34 @@ const createTransaction = async (req, res) => {
         return res.status(400).json({ success: false, message: 'Insufficient funds' });
       }
       balance.amount -= amount;
+    } else if (type === 'transfer') {
+      if (!toPhoneNumber) {
+        return res.status(400).json({ success: false, message: 'Recipient phone number is required for transfers' });
+      }
+
+      if (fromBalance.amount < amount) {
+        return res.status(400).json({ success: false, message: 'Insufficient funds for transfer' });
+      }
+
+      const toUser = await User.findOne({ phoneNumber: toPhoneNumber });
+      if (!toUser) {
+        return res.status(404).json({ success: false, message: 'Recipient not found' });
+      }
+
+      let toBalance = toUser.balances.find(b => b.currency === currency);
+      if (!toBalance) {
+        toBalance = { currency, amount: 0 };
+        toUser.balances.push(toBalance);
+      }
+
+      fromBalance.amount -= amount;
+      toBalance.amount += amount;
+
+      await toUser.save();
     } else {
       return res.status(400).json({ success: false, message: 'Invalid transaction type. Use this endpoint only for deposits and withdrawals.' });
     }
-    
+
     await user.save();
 
     const transaction = await Transaction.create({
@@ -60,7 +84,7 @@ const createTransaction = async (req, res) => {
       amount,
       status: 'completed',
     });
-    
+
     res.status(201).json({ success: true, data: transaction });
 
   } catch (error) {
