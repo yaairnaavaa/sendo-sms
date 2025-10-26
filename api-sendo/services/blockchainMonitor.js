@@ -37,34 +37,149 @@ class ArbitrumMonitor {
     this.pyusdContract = new ethers.Contract(ARBITRUM_CONTRACTS.PYUSD, ERC20_ABI, this.provider);
     this.usdtContract = new ethers.Contract(ARBITRUM_CONTRACTS.USDT, ERC20_ABI, this.provider);
     this.lastCheckedBlock = null;
+    this.pollingInterval = null;
+    this.isPolling = false;
   }
 
   /**
-   * Inicia el monitoreo de eventos de transferencia
+   * Inicia el monitoreo por polling (cada 10 segundos)
    */
   async startMonitoring() {
-    console.log('🔍 Starting Arbitrum monitoring...');
+    console.log('🔍 Starting Arbitrum monitoring (Polling Mode)...');
     console.log(`   PYUSD Contract: ${ARBITRUM_CONTRACTS.PYUSD}`);
     console.log(`   USDT Contract: ${ARBITRUM_CONTRACTS.USDT}`);
     console.log(`   RPC: ${RPC_ENDPOINTS.arbitrum}`);
+    console.log(`   Polling interval: 10 seconds`);
 
     // Obtener el bloque actual
     this.lastCheckedBlock = await this.provider.getBlockNumber();
     console.log(`   Starting from block ${this.lastCheckedBlock}`);
 
-    // Monitorear PYUSD
-    this.pyusdContract.on('Transfer', async (from, to, value, event) => {
-      console.log(`📥 PYUSD Transfer detected: ${ethers.formatUnits(value, 6)} PYUSD to ${to}`);
-      await this.handleTransfer('PYUSD-ARB', to, value, event);
-    });
+    // Iniciar polling
+    this.isPolling = true;
+    this.pollingInterval = setInterval(() => {
+      this.checkForDeposits().catch(err => {
+        console.error('❌ Error in polling cycle:', err.message);
+      });
+    }, 10000); // 10 segundos
 
-    // Monitorear USDT
-    this.usdtContract.on('Transfer', async (from, to, value, event) => {
-      console.log(`📥 USDT Transfer detected: ${ethers.formatUnits(value, 6)} USDT to ${to}`);
-      await this.handleTransfer('USDT-ARB', to, value, event);
+    console.log('✅ Arbitrum monitoring active - polling every 10 seconds');
+    
+    // Primera verificación inmediata
+    this.checkForDeposits().catch(err => {
+      console.error('❌ Error in initial check:', err.message);
     });
+  }
 
-    console.log('✅ Arbitrum monitoring active - listening for Transfer events');
+  /**
+   * Verifica depósitos desde el último bloque verificado
+   */
+  async checkForDeposits() {
+    if (!this.isPolling) return;
+
+    try {
+      const currentBlock = await this.provider.getBlockNumber();
+      
+      // Si no hay bloques nuevos, skip
+      if (currentBlock <= this.lastCheckedBlock) {
+        return;
+      }
+
+      const fromBlock = this.lastCheckedBlock + 1;
+      const toBlock = currentBlock;
+
+      console.log(`\n🔍 Checking blocks ${fromBlock} to ${toBlock} (${toBlock - fromBlock + 1} blocks)`);
+
+      // Obtener todos los usuarios de una vez para evitar múltiples queries
+      const users = await User.find({ 
+        arbitrumAddress: { $exists: true, $ne: null } 
+      });
+      
+      if (users.length === 0) {
+        this.lastCheckedBlock = currentBlock;
+        return;
+      }
+
+      const userAddresses = users.map(u => u.arbitrumAddress.toLowerCase());
+
+      // Event signature for Transfer(address,address,uint256)
+      const transferTopic = ethers.id('Transfer(address,address,uint256)');
+
+      // Query PYUSD transfers
+      const pyusdFilter = {
+        address: ARBITRUM_CONTRACTS.PYUSD,
+        fromBlock: fromBlock,
+        toBlock: toBlock,
+        topics: [transferTopic]
+      };
+
+      const pyusdLogs = await this.provider.getLogs(pyusdFilter);
+      
+      // Query USDT transfers
+      const usdtFilter = {
+        address: ARBITRUM_CONTRACTS.USDT,
+        fromBlock: fromBlock,
+        toBlock: toBlock,
+        topics: [transferTopic]
+      };
+
+      const usdtLogs = await this.provider.getLogs(usdtFilter);
+
+      // Process PYUSD logs
+      for (const log of pyusdLogs) {
+        await this.processTransferLog(log, 'PYUSD-ARB', users, userAddresses);
+      }
+
+      // Process USDT logs
+      for (const log of usdtLogs) {
+        await this.processTransferLog(log, 'USDT-ARB', users, userAddresses);
+      }
+
+      this.lastCheckedBlock = currentBlock;
+
+    } catch (error) {
+      console.error('❌ Error checking for deposits:', error.message);
+      // Don't update lastCheckedBlock on error - will retry
+    }
+  }
+
+  /**
+   * Procesa un log de Transfer
+   */
+  async processTransferLog(log, currency, users, userAddresses) {
+    try {
+      // Decode log
+      const iface = new ethers.Interface(['event Transfer(address indexed from, address indexed to, uint256 value)']);
+      const decoded = iface.parseLog(log);
+      
+      const to = decoded.args.to.toLowerCase();
+      
+      // Check if it's one of our users
+      const userIndex = userAddresses.indexOf(to);
+      if (userIndex === -1) {
+        return; // Not our user
+      }
+
+      const user = users[userIndex];
+      const value = decoded.args.value;
+      const amount = parseFloat(ethers.formatUnits(value, 6));
+
+      console.log(`\n📥 ${currency} Transfer detected!`);
+      console.log(`   User: ${user.name}`);
+      console.log(`   Amount: ${amount} ${currency}`);
+      console.log(`   TX Hash: ${log.transactionHash}`);
+      console.log(`   Block: ${log.blockNumber}`);
+
+      const currentBlock = await this.provider.getBlockNumber();
+      const confirmations = currentBlock - log.blockNumber;
+      console.log(`   Confirmations: ${confirmations}/12`);
+
+      // Process deposit
+      await this.processDeposit(user, currency, amount, log.transactionHash, confirmations);
+
+    } catch (error) {
+      console.error('❌ Error processing transfer log:', error.message);
+    }
   }
 
   /**
@@ -173,8 +288,11 @@ class ArbitrumMonitor {
    * Detiene el monitoreo
    */
   stopMonitoring() {
-    this.pyusdContract.removeAllListeners('Transfer');
-    this.usdtContract.removeAllListeners('Transfer');
+    this.isPolling = false;
+    if (this.pollingInterval) {
+      clearInterval(this.pollingInterval);
+      this.pollingInterval = null;
+    }
     console.log('🛑 Arbitrum monitoring stopped');
   }
 
