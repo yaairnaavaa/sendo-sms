@@ -224,16 +224,35 @@ class ArbitrumMonitor {
           
           const pyusdEntry = user.balances.find(b => b.currency === 'PYUSD-ARB');
           if (pyusdEntry && pyusdEntry.amount !== pyusdAmount) {
-            pyusdEntry.amount = pyusdAmount;
-            updated = true;
-            console.log(`  ✅ Updated PYUSD: ${dbPyusd} → ${pyusdAmount}`);
+            // SAFETY: Only update if on-chain balance is HIGHER than DB
+            // This prevents overwriting if a deposit just came in
+            if (pyusdAmount > pyusdEntry.amount) {
+              console.log(`  ⚠️ On-chain PYUSD (${pyusdAmount}) > DB (${pyusdEntry.amount}) - likely missed deposit`);
+              pyusdEntry.amount = pyusdAmount;
+              updated = true;
+              userResult.pyusd.action = 'increased';
+            } else if (pyusdAmount < pyusdEntry.amount) {
+              console.log(`  ⚠️ On-chain PYUSD (${pyusdAmount}) < DB (${pyusdEntry.amount}) - likely a sweep occurred`);
+              pyusdEntry.amount = pyusdAmount;
+              updated = true;
+              userResult.pyusd.action = 'decreased';
+            }
           }
           
           const usdtEntry = user.balances.find(b => b.currency === 'USDT-ARB');
           if (usdtEntry && usdtEntry.amount !== usdtAmount) {
-            usdtEntry.amount = usdtAmount;
-            updated = true;
-            console.log(`  ✅ Updated USDT: ${dbUsdt} → ${usdtAmount}`);
+            // SAFETY: Only update if on-chain balance is HIGHER than DB
+            if (usdtAmount > usdtEntry.amount) {
+              console.log(`  ⚠️ On-chain USDT (${usdtAmount}) > DB (${usdtEntry.amount}) - likely missed deposit`);
+              usdtEntry.amount = usdtAmount;
+              updated = true;
+              userResult.usdt.action = 'increased';
+            } else if (usdtAmount < usdtEntry.amount) {
+              console.log(`  ⚠️ On-chain USDT (${usdtAmount}) < DB (${usdtEntry.amount}) - likely a sweep occurred`);
+              usdtEntry.amount = usdtAmount;
+              updated = true;
+              userResult.usdt.action = 'decreased';
+            }
           }
           
           if (updated) {

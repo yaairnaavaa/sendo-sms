@@ -67,6 +67,8 @@ router.post('/stop', (req, res) => {
 // @route   POST /api/monitor/sync
 // @access  Private (add authentication in production)
 // @body    { updateDB: boolean } - Optional: if true, updates database with on-chain balances
+// @note    Use updateDB=true ONLY when monitoring is stopped to avoid race conditions
+//          The sync will detect missed deposits (on-chain > DB) or missed sweeps (on-chain < DB)
 router.post('/sync', async (req, res) => {
   try {
     const { arbitrumMonitor } = getMonitors();
