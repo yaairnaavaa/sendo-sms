@@ -52,7 +52,7 @@ const createTransaction = async (req, res) => {
         return res.status(400).json({ success: false, message: 'Recipient phone number is required for transfers' });
       }
 
-      if (fromBalance.amount < amount) {
+      if (balance.amount < amount) {
         return res.status(400).json({ success: false, message: 'Insufficient funds for transfer' });
       }
 
@@ -67,7 +67,7 @@ const createTransaction = async (req, res) => {
         toUser.balances.push(toBalance);
       }
 
-      fromBalance.amount -= amount;
+      balance.amount -= amount;
       toBalance.amount += amount;
 
       await toUser.save();
