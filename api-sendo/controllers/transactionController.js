@@ -30,7 +30,7 @@ const createTransaction = async (req, res) => {
   }
 
   try {
-    const user = await User.findById(userId);
+    const user = await User.findById({phoneNumber:userId});
     if (!user) {
       return res.status(404).json({ success: false, message: 'User not found' });
     }
