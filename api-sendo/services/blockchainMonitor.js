@@ -172,13 +172,16 @@ class ArbitrumMonitor {
   /**
    * Verifica manualmente los balances de todos los usuarios
    * Útil para sincronización inicial o recuperación
+   * @param {boolean} updateDB - Si true, actualiza los balances en la base de datos
    */
-  async syncAllBalances() {
+  async syncAllBalances(updateDB = false) {
     console.log('🔄 Syncing all user balances...');
     
     const users = await User.find({ 
       arbitrumAddress: { $exists: true, $ne: null } 
     });
+
+    const results = [];
 
     for (const user of users) {
       try {
@@ -186,22 +189,75 @@ class ArbitrumMonitor {
         const pyusdBalance = await this.pyusdContract.balanceOf(user.arbitrumAddress);
         const pyusdAmount = parseFloat(ethers.formatUnits(pyusdBalance, 6));
         
+        // Small delay to avoid rate limits
+        await new Promise(resolve => setTimeout(resolve, 100));
+        
         // Check USDT balance
         const usdtBalance = await this.usdtContract.balanceOf(user.arbitrumAddress);
         const usdtAmount = parseFloat(ethers.formatUnits(usdtBalance, 6));
 
+        const dbPyusd = user.balances.find(b => b.currency === 'PYUSD-ARB')?.amount || 0;
+        const dbUsdt = user.balances.find(b => b.currency === 'USDT-ARB')?.amount || 0;
+
         console.log(`User ${user.name}:`);
-        console.log(`  On-chain PYUSD: ${pyusdAmount}`);
-        console.log(`  DB PYUSD: ${user.balances.find(b => b.currency === 'PYUSD-ARB')?.amount || 0}`);
-        console.log(`  On-chain USDT: ${usdtAmount}`);
-        console.log(`  DB USDT: ${user.balances.find(b => b.currency === 'USDT-ARB')?.amount || 0}`);
+        console.log(`  On-chain PYUSD: ${pyusdAmount}, DB: ${dbPyusd}`);
+        console.log(`  On-chain USDT: ${usdtAmount}, DB: ${dbUsdt}`);
+
+        const userResult = {
+          user: user.name,
+          address: user.arbitrumAddress,
+          pyusd: {
+            onChain: pyusdAmount,
+            database: dbPyusd,
+            synced: pyusdAmount === dbPyusd
+          },
+          usdt: {
+            onChain: usdtAmount,
+            database: dbUsdt,
+            synced: usdtAmount === dbUsdt
+          }
+        };
+
+        // Update database if requested
+        if (updateDB) {
+          let updated = false;
+          
+          const pyusdEntry = user.balances.find(b => b.currency === 'PYUSD-ARB');
+          if (pyusdEntry && pyusdEntry.amount !== pyusdAmount) {
+            pyusdEntry.amount = pyusdAmount;
+            updated = true;
+            console.log(`  ✅ Updated PYUSD: ${dbPyusd} → ${pyusdAmount}`);
+          }
+          
+          const usdtEntry = user.balances.find(b => b.currency === 'USDT-ARB');
+          if (usdtEntry && usdtEntry.amount !== usdtAmount) {
+            usdtEntry.amount = usdtAmount;
+            updated = true;
+            console.log(`  ✅ Updated USDT: ${dbUsdt} → ${usdtAmount}`);
+          }
+          
+          if (updated) {
+            await user.save();
+            userResult.updated = true;
+          }
+        }
+
+        results.push(userResult);
+
+        // Small delay between users
+        await new Promise(resolve => setTimeout(resolve, 200));
 
       } catch (error) {
         console.error(`Error syncing balance for ${user.name}:`, error.message);
+        results.push({
+          user: user.name,
+          error: error.message
+        });
       }
     }
 
     console.log('✅ Balance sync completed');
+    return results;
   }
 }
 
