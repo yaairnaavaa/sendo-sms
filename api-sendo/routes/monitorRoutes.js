@@ -66,6 +66,7 @@ router.post('/stop', (req, res) => {
 // @desc    Trigger manual balance sync
 // @route   POST /api/monitor/sync
 // @access  Private (add authentication in production)
+// @body    { updateDB: boolean } - Optional: if true, updates database with on-chain balances
 router.post('/sync', async (req, res) => {
   try {
     const { arbitrumMonitor } = getMonitors();
@@ -77,11 +78,13 @@ router.post('/sync', async (req, res) => {
       });
     }
 
-    await arbitrumMonitor.syncAllBalances();
+    const updateDB = req.body?.updateDB === true;
+    const results = await arbitrumMonitor.syncAllBalances(updateDB);
     
     res.json({
       success: true,
-      message: 'Balance sync completed'
+      message: updateDB ? 'Balance sync and update completed' : 'Balance sync completed (read-only)',
+      data: results
     });
   } catch (error) {
     res.status(500).json({
