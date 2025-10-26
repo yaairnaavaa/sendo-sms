@@ -321,7 +321,8 @@ class WithdrawalService {
     // Estimar gas primero
     const gasEstimate = await contract.transfer.estimateGas(
       destinationAddress,
-      amountInUnits
+      amountInUnits,
+      { from: this.hotWallet.address }
     );
 
     console.log(`⛽ Estimated gas: ${gasEstimate.toString()}`);
@@ -433,7 +434,8 @@ class WithdrawalService {
 
     const gasEstimate = await contract.transfer.estimateGas(
       destinationAddress,
-      amountInUnits
+      amountInUnits,
+      { from: this.hotWallet.address }
     );
 
     const feeData = await this.provider.getFeeData();
