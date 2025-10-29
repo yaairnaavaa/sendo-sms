@@ -321,14 +321,57 @@ class WithdrawalService {
     // Estimar gas primero
     const gasEstimate = await contract.transfer.estimateGas(
       destinationAddress,
-      amountInUnits
+      amountInUnits,
+      { from: this.hotWallet.address }
     );
 
     console.log(`⛽ Estimated gas: ${gasEstimate.toString()}`);
 
+    // Calcular ETH necesario para gas
+    const feeData = await this.provider.getFeeData();
+    const gasLimit = gasEstimate * BigInt(120) / BigInt(100); // 20% buffer
+    const ethNeeded = gasLimit * feeData.gasPrice;
+
+    console.log(`💰 ETH needed for gas: ${ethers.formatEther(ethNeeded)} ETH`);
+
+    // Verificar balance de ETH de la hot wallet
+    const hotWalletEthBalance = await this.provider.getBalance(this.hotWallet.address);
+    console.log(`💼 Hot wallet ETH balance: ${ethers.formatEther(hotWalletEthBalance)} ETH`);
+
+    // Si no tiene suficiente ETH, pedir a gas sponsor
+    if (hotWalletEthBalance < ethNeeded) {
+      console.log(`⚠️ Insufficient ETH in hot wallet, requesting from gas sponsor...`);
+      
+      const gasSponsorPrivateKey = process.env.GAS_SPONSOR_PRIVATE_KEY;
+      if (!gasSponsorPrivateKey) {
+        throw new Error('GAS_SPONSOR_PRIVATE_KEY not configured');
+      }
+
+      const gasSponsorWallet = new ethers.Wallet(gasSponsorPrivateKey, this.provider);
+      
+      // Enviar ETH con un 30% extra para cubrir múltiples withdrawals
+      const ethToSend = ethNeeded * BigInt(130) / BigInt(100);
+      
+      console.log(`📤 Sending ${ethers.formatEther(ethToSend)} ETH from gas sponsor to hot wallet...`);
+      
+      const gasTx = await gasSponsorWallet.sendTransaction({
+        to: this.hotWallet.address,
+        value: ethToSend
+      });
+
+      console.log(`⏳ Gas transfer TX: ${gasTx.hash}`);
+      await gasTx.wait();
+      console.log(`✅ Gas transferred successfully`);
+
+      // Pequeña espera para asegurar que el balance se actualice
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    } else {
+      console.log(`✅ Hot wallet has sufficient ETH for gas`);
+    }
+
     // Enviar transacción
     const tx = await contract.transfer(destinationAddress, amountInUnits, {
-      gasLimit: gasEstimate * BigInt(120) / BigInt(100) // 20% buffer
+      gasLimit: gasLimit
     });
 
     console.log(`⏳ Transaction submitted: ${tx.hash}`);
@@ -357,12 +400,43 @@ class WithdrawalService {
     // Estimar gas
     const gasEstimate = await contract.transfer.estimateGas(
       treasuryAddress,
-      feeInUnits
+      feeInUnits,
+      { from: this.hotWallet.address }
     );
+
+    // Calcular ETH necesario para gas
+    const feeData = await this.provider.getFeeData();
+    const gasLimit = gasEstimate * BigInt(120) / BigInt(100); // 20% buffer
+    const ethNeeded = gasLimit * feeData.gasPrice;
+
+    // Verificar balance de ETH de la hot wallet
+    const hotWalletEthBalance = await this.provider.getBalance(this.hotWallet.address);
+
+    // Si no tiene suficiente ETH, pedir a gas sponsor
+    if (hotWalletEthBalance < ethNeeded) {
+      console.log(`⚠️ Insufficient ETH in hot wallet for fee transfer, requesting from gas sponsor...`);
+      
+      const gasSponsorPrivateKey = process.env.GAS_SPONSOR_PRIVATE_KEY;
+      if (!gasSponsorPrivateKey) {
+        throw new Error('GAS_SPONSOR_PRIVATE_KEY not configured');
+      }
+
+      const gasSponsorWallet = new ethers.Wallet(gasSponsorPrivateKey, this.provider);
+      const ethToSend = ethNeeded * BigInt(130) / BigInt(100);
+      
+      const gasTx = await gasSponsorWallet.sendTransaction({
+        to: this.hotWallet.address,
+        value: ethToSend
+      });
+
+      await gasTx.wait();
+      console.log(`✅ Gas transferred for fee transaction`);
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
 
     // Enviar transacción
     const tx = await contract.transfer(treasuryAddress, feeInUnits, {
-      gasLimit: gasEstimate * BigInt(120) / BigInt(100) // 20% buffer
+      gasLimit: gasLimit
     });
 
     console.log(`⏳ Fee transaction submitted: ${tx.hash}`);
@@ -433,7 +507,8 @@ class WithdrawalService {
 
     const gasEstimate = await contract.transfer.estimateGas(
       destinationAddress,
-      amountInUnits
+      amountInUnits,
+      { from: this.hotWallet.address }
     );
 
     const feeData = await this.provider.getFeeData();

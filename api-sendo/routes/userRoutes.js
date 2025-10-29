@@ -6,6 +6,7 @@ const {
   createUser,
   updateUser,
   deleteUser,
+  getUserByPhone
 } = require('../controllers/userController');
 
 // Re-route into other resource routers
@@ -22,6 +23,7 @@ router.use('/:userId/bitcoin-account', bitcoinRouter);
 router.use('/:userId/deposit', depositRouter);
 
 router.route('/').get(getUsers).post(createUser);
+router.route('/phone/:phone').get(getUserByPhone);
 router.route('/:id').get(getUser).put(updateUser).delete(deleteUser);
 
 module.exports = router;
