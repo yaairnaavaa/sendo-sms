@@ -48,6 +48,10 @@ const createTransaction = async (req, res) => {
       }
       balance.amount -= amount;
     } else if (type === 'transfer') {
+
+      console.log("---TRANSFER---");
+      console.log(req.body);
+      
       if (!toPhoneNumber) {
         return res.status(400).json({ success: false, message: 'Recipient phone number is required for transfers' });
       }
