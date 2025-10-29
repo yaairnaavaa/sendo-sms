@@ -60,10 +60,14 @@ const createTransaction = async (req, res) => {
         return res.status(400).json({ success: false, message: 'Insufficient funds for transfer' });
       }
 
+      console.log("--1--");
+
       const toUser = await User.findOne({ phoneNumber: toPhoneNumber });
       if (!toUser) {
         return res.status(404).json({ success: false, message: 'Recipient not found' });
       }
+
+      console.log("--2--");
 
       let toBalance = toUser.balances.find(b => b.currency === currency);
       if (!toBalance) {
@@ -74,12 +78,15 @@ const createTransaction = async (req, res) => {
       balance.amount -= amount;
       toBalance.amount += amount;
 
+    console.log("--3--");
       await toUser.save();
     } else {
       return res.status(400).json({ success: false, message: 'Invalid transaction type. Use this endpoint only for deposits and withdrawals.' });
     }
 
     await user.save();
+
+    console.log("--4--");
 
     const transaction = await Transaction.create({
       user: user._id,
@@ -89,9 +96,13 @@ const createTransaction = async (req, res) => {
       status: 'completed',
     });
 
+    console.log("--5--");
+
     res.status(201).json({ success: true, data: transaction });
 
   } catch (error) {
+    console.log("--6--");
+    console.log(error)
     res.status(500).json({ success: false, message: 'Server Error', error: error.message });
   }
 };
